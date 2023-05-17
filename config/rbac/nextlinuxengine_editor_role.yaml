@@ -1,0 +1,24 @@
+# permissions for end users to edit nextlinuxengines.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: nextlinuxengine-editor-role
+rules:
+- apiGroups:
+  - charts.nextlinux.io
+  resources:
+  - nextlinuxengines
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - charts.nextlinux.io
+  resources:
+  - nextlinuxengines/status
+  verbs:
+  - get

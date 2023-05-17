@@ -1,0 +1,259 @@
+{{- $component := "policy" -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ template "nextlinux-engine.policy-engine.fullname" . }}
+  labels:
+    app: {{ template "nextlinux-engine.fullname" . }}
+    chart: {{ .Chart.Name }}-{{ .Chart.Version }}
+    release: {{ .Release.Name }}
+    heritage: {{ .Release.Service }}
+    component: {{ $component }}
+    {{- with .Values.nextlinuxPolicyEngine.labels }}
+    {{ toYaml . | nindent 4 }}
+    {{- end }}
+    {{- with .Values.nextlinuxGlobal.labels }}
+    {{ toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  selector:
+    matchLabels:
+      app: {{ template "nextlinux-engine.fullname" . }}
+      component: {{ $component }}
+  replicas: {{ .Values.nextlinuxPolicyEngine.replicaCount }}
+  strategy:
+    type: Recreate
+    rollingUpdate: null
+  template:
+    metadata:
+      labels:
+        app: {{ template "nextlinux-engine.fullname" . }}
+        component: {{ $component }}
+        {{- with .Values.nextlinuxPolicyEngine.labels }}
+        {{ toYaml . | nindent 8 }}
+        {{- end }}
+        {{- with .Values.nextlinuxGlobal.labels }}
+        {{ toYaml . | nindent 8 }}
+        {{- end }}
+      annotations:
+      {{- with .Values.nextlinuxGlobal.annotations }}
+        {{ toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.nextlinuxPolicyEngine.annotations }}
+        {{ toYaml . | nindent 8 }}
+      {{- end }}
+      {{- if not .Values.inject_secrets_via_env }}
+        checksum/secrets: {{ include (print $.Template.BasePath "/engine_secret.yaml") . | sha256sum }}
+      {{- end }}
+        checksum/env: {{ include (print $.Template.BasePath "/engine_configmap_env.yaml") . | sha256sum }}
+        checksum/engine-config: {{ include (print $.Template.BasePath "/engine_configmap.yaml") . | sha256sum }}
+    spec:
+      {{- with .Values.nextlinuxGlobal.securityContext }}
+      securityContext:
+        {{ toYaml . | nindent 8 }}
+      {{- end }}
+    {{- if .Values.nextlinuxEnterpriseGlobal.enabled }}
+      imagePullSecrets:
+      - name: {{ .Values.nextlinuxEnterpriseGlobal.imagePullSecretName }}
+    {{- else }}
+      {{- with .Values.nextlinuxGlobal.imagePullSecretName }}
+      imagePullSecrets:
+      - name: {{ . }}
+      {{- end }}
+    {{- end }}
+    {{- if and .Values.nextlinuxGlobal.scratchVolume.fixGroupPermissions .Values.nextlinuxGlobal.securityContext.fsGroup }}
+      initContainers:
+        - name: mode-fixer
+          image: alpine
+          securityContext:
+            runAsUser: 0
+          volumeMounts:
+            - name: {{ $component }}-scratch
+              mountPath: {{ .Values.nextlinuxGlobal.scratchVolume.mountPath }}
+          command:
+            - sh
+            - -c
+            - (chmod 0775 {{ .Values.nextlinuxGlobal.scratchVolume.mountPath }}; chgrp {{ .Values.nextlinuxGlobal.securityContext.fsGroup }} {{ .Values.nextlinuxGlobal.scratchVolume.mountPath }} )
+      {{- end }}
+      containers:
+      {{- if .Values.cloudsql.enabled  }}
+      - name: cloudsql-proxy
+        image: {{ .Values.cloudsql.image.repository }}:{{ .Values.cloudsql.image.tag }}
+        imagePullPolicy: {{ .Values.cloudsql.image.pullPolicy }}
+        command: ["/cloud_sql_proxy"]
+        args:
+        - "-instances={{ .Values.cloudsql.instance }}=tcp:5432"
+        {{- if .Values.cloudsql.useExistingServiceAcc }}
+        - "-credential_file=/var/{{ .Values.cloudsql.serviceAccSecretName }}/{{ .Values.cloudsql.serviceAccJsonName }}"
+        volumeMounts:
+        - mountPath: /var/{{ .Values.cloudsql.serviceAccSecretName }}
+          name: {{ .Values.cloudsql.serviceAccSecretName }}
+          readOnly: true
+        {{- end }}
+      {{- end }}
+      - name: {{ .Chart.Name }}-{{ $component }}
+        {{- if .Values.nextlinuxEnterpriseGlobal.enabled }}
+        image: {{ .Values.nextlinuxEnterpriseGlobal.image }}
+        imagePullPolicy: {{ .Values.nextlinuxEnterpriseGlobal.imagePullPolicy }}
+        {{- else }}
+        image: {{ .Values.nextlinuxGlobal.image }}
+        imagePullPolicy: {{ .Values.nextlinuxGlobal.imagePullPolicy }}
+        {{- end }}
+        {{- if .Values.nextlinuxEnterpriseGlobal.enabled }}
+        args: ["nextlinux-enterprise-manager", "service", "start", "--no-auto-upgrade", "policy_engine"]
+        {{- else }}
+        args: ["nextlinux-manager", "service", "start", "--no-auto-upgrade", "policy_engine"]
+        {{- end }}
+        envFrom:
+        {{- if not .Values.inject_secrets_via_env }}
+        {{- if .Values.nextlinuxGlobal.existingSecret }}
+        - secretRef:
+            name: {{ .Values.nextlinuxGlobal.existingSecret }}
+        {{- else }}
+        - secretRef:
+            name: {{ include "nextlinux-engine.fullname" . }}
+        - secretRef:
+            name: {{ print (include "nextlinux-engine.fullname" .) "-admin-pass" }}
+        {{- end }}
+        {{- end }}
+        - configMapRef:
+            name: {{ template "nextlinux-engine.fullname" . }}-env
+        env:
+        {{- with .Values.nextlinuxGlobal.extraEnv }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+        {{- with .Values.nextlinuxPolicyEngine.extraEnv }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+        - name: NEXTLINUX_POD_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        ports:
+        - name: policy
+          containerPort: {{ .Values.nextlinuxPolicyEngine.service.port }}
+        volumeMounts:
+        {{- if .Values.nextlinuxEnterpriseGlobal.enabled }}
+        - name: nextlinux-license
+          mountPath: /home/nextlinux/license.yaml
+          subPath: license.yaml
+        {{- end }}
+        - name: config-volume
+          mountPath: /config/config.yaml
+          subPath: config.yaml
+        - name: {{ $component }}-scratch
+          mountPath: {{ .Values.nextlinuxGlobal.scratchVolume.mountPath }}
+        {{- if .Values.nextlinuxGlobal.openShiftDeployment }}
+        - name: service-config-volume
+          mountPath: /nextlinux_service_config
+        - name: logs
+          mountPath: /var/log/nextlinux
+        - name: run
+          mountPath: /var/run/nextlinux
+        {{- end }}
+        {{- if (.Values.nextlinuxGlobal.certStoreSecretName) }}
+        - name: certs
+          mountPath: /home/nextlinux/certs/
+          readOnly: true
+        {{- end }}
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: policy
+            {{- if .Values.nextlinuxGlobal.internalServicesSsl.enabled }}
+            scheme: HTTPS
+            {{- end }}
+          initialDelaySeconds: {{ .Values.nextlinuxGlobal.probes.liveness.initialDelaySeconds }}
+          timeoutSeconds: {{ .Values.nextlinuxGlobal.probes.liveness.timeoutSeconds }}
+          periodSeconds: {{ .Values.nextlinuxGlobal.probes.liveness.periodSeconds }}
+          failureThreshold: {{ .Values.nextlinuxGlobal.probes.liveness.failureThreshold }}
+          successThreshold: {{ .Values.nextlinuxGlobal.probes.liveness.successThreshold }}
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: policy
+            {{- if .Values.nextlinuxGlobal.internalServicesSsl.enabled }}
+            scheme: HTTPS
+            {{- end }}
+          timeoutSeconds: {{ .Values.nextlinuxGlobal.probes.readiness.timeoutSeconds }}
+          periodSeconds: {{ .Values.nextlinuxGlobal.probes.readiness.periodSeconds }}
+          failureThreshold: {{ .Values.nextlinuxGlobal.probes.readiness.failureThreshold }}
+          successThreshold: {{ .Values.nextlinuxGlobal.probes.readiness.successThreshold }}
+        resources:
+          {{ toYaml .Values.nextlinuxPolicyEngine.resources | nindent 10 }}
+      volumes:
+        {{- if .Values.nextlinuxEnterpriseGlobal.enabled }}
+        - name: nextlinux-license
+          secret:
+            secretName: {{ .Values.nextlinuxEnterpriseGlobal.licenseSecretName }}
+        {{- end }}
+        - name: config-volume
+          configMap:
+            name: {{ template "nextlinux-engine.fullname" . }}
+        - name: {{ $component }}-scratch
+          {{ toYaml .Values.nextlinuxGlobal.scratchVolume.details | nindent 10 }}
+        {{- if .Values.nextlinuxGlobal.openShiftDeployment }}
+        - name: service-config-volume
+          emptyDir: {}
+        - name: logs
+          emptyDir: {}
+        - name: run
+          emptyDir: {}
+        {{- end }}
+        {{- with .Values.nextlinuxGlobal.certStoreSecretName }}
+        - name: certs
+          secret:
+            secretName: {{ . }}
+        {{- end }}
+        {{- if .Values.cloudsql.useExistingServiceAcc }}
+        - name: {{ .Values.cloudsql.serviceAccSecretName }}
+          secret:
+            secretName: {{ .Values.cloudsql.serviceAccSecretName }}
+        {{- end }}
+      {{- with .Values.nextlinuxPolicyEngine.nodeSelector }}
+      nodeSelector:
+        {{ toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.nextlinuxPolicyEngine.affinity }}
+      affinity:
+        {{ toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.nextlinuxPolicyEngine.tolerations }}
+      tolerations:
+        {{ toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.nextlinuxGlobal.serviceAccountName }}
+      serviceAccountName: {{ . }}
+      {{- end }}
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ template "nextlinux-engine.policy-engine.fullname" . }}
+  labels:
+    app: {{ template "nextlinux-engine.fullname" . }}
+    chart: {{ .Chart.Name }}-{{ .Chart.Version }}
+    release: {{ .Release.Name }}
+    heritage: {{ .Release.Service }}
+    component: {{ $component }}
+    {{- with .Values.nextlinuxPolicyEngine.service.labels }}
+    {{ toYaml . | nindent 4 }}
+    {{- end }}
+    {{- with .Values.nextlinuxGlobal.labels }}
+    {{ toYaml . | nindent 4 }}
+    {{- end }}
+  {{- with .Values.nextlinuxPolicyEngine.service.annotations }}
+  annotations:
+    {{ toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: {{ .Values.nextlinuxPolicyEngine.service.type }}
+  ports:
+    - name: nextlinux-policy-api
+      port: {{ .Values.nextlinuxPolicyEngine.service.port }}
+      targetPort: {{ .Values.nextlinuxPolicyEngine.service.port }}
+      protocol: TCP
+  selector:
+    app: {{ template "nextlinux-engine.fullname" . }}
+    component: {{ $component }}

@@ -1,0 +1,9 @@
+# Use the 'create api' subcommand to add watches to this file.
+- group: charts.nextlinux.io
+  version: v1alpha1
+  kind: NextlinuxEngine
+  chart: helm-charts/nextlinux-engine
+  overrideValues:
+    nextlinuxGlobal.image: $RELATED_IMAGE_NEXTLINUX_ENGINE
+    postgresql.image: $RELATED_IMAGE_NEXTLINUX_POSTGRESQL
+# +kubebuilder:scaffold:watch

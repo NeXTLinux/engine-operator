@@ -1,0 +1,5 @@
+channels:
+- currentCSV: nextlinux-engine.v1.0.0
+  name: alpha
+defaultChannel: alpha
+packageName: nextlinux-engine

@@ -1,0 +1,74 @@
+{{- if and .Values.nextlinuxEnterpriseGlobal.enabled .Values.nextlinuxEnterpriseUi.enabled -}}
+{{- $component := "enterprise-ui" -}}
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "nextlinux-engine.enterprise-ui.fullname" . | quote }}
+  labels:
+    app: {{ include "nextlinux-engine.fullname" . | quote }}
+    component: {{ $component }}
+    chart: {{ .Chart.Name }}-{{ .Chart.Version }}
+    release: {{ .Release.Name }}
+    heritage: {{ .Release.Service }}
+    {{- with .Values.nextlinuxGlobal.labels }}
+    {{ toYaml . | nindent 4 }}
+    {{- end }}
+data:
+  config-ui.yaml: |
+    {{- if .Values.nextlinuxGlobal.internalServicesSsl.enabled }}
+    engine_uri: 'https://{{ template "nextlinux-engine.api.fullname" . }}:{{ .Values.nextlinuxApi.service.port }}/v1'
+    {{- else }}
+    engine_uri: 'http://{{ template "nextlinux-engine.api.fullname" . }}:{{ .Values.nextlinuxApi.service.port }}/v1'
+    {{- end }}
+    # This value is overridden by using the `NEXTLINUX_REDIS_URI` environment variable.
+    # redis_ui: $NEXTLINUX_REDIS_URI
+  {{- if .Values.nextlinuxEnterpriseRbac.enabled }}
+    {{- if .Values.nextlinuxGlobal.internalServicesSsl.enabled }}
+    rbac_uri: 'https://{{ template "nextlinux-engine.api.fullname" . }}:{{ .Values.nextlinuxEnterpriseRbac.service.apiPort }}/v1'
+    {{- else }}
+    rbac_uri: 'http://{{ template "nextlinux-engine.api.fullname" . }}:{{ .Values.nextlinuxEnterpriseRbac.service.apiPort }}/v1'
+    {{- end }}
+  {{- end }}
+  {{- if .Values.nextlinuxEnterpriseReports.enabled }}
+    {{- if .Values.nextlinuxGlobal.internalServicesSsl.enabled }}
+    reports_uri: 'https://{{ template "nextlinux-engine.api.fullname" . }}:{{ .Values.nextlinuxEnterpriseReports.service.port}}/v1'
+    {{- else}}
+    reports_uri: 'http://{{ template "nextlinux-engine.api.fullname" . }}:{{ .Values.nextlinuxEnterpriseReports.service.port}}/v1'
+    {{- end }}
+  {{- end }}
+  {{- if .Values.nextlinuxEnterpriseNotifications.enabled }}
+    {{- if .Values.nextlinuxGlobal.internalServicesSsl.enabled }}
+    notifications_uri: 'https://{{ template "nextlinux-engine.api.fullname" . }}:{{ .Values.nextlinuxEnterpriseNotifications.service.port}}/v1'
+    {{- else}}
+    notifications_uri: 'http://{{ template "nextlinux-engine.api.fullname" . }}:{{ .Values.nextlinuxEnterpriseNotifications.service.port}}/v1'
+    {{- end }}
+  {{- end }}
+    # This value is overridden by using the `NEXTLINUX_APPDB_URI` environment variable.
+    # appdb_uri: $NEXTLINUX_APPDB_URI
+    license_path: '/home/nextlinux/'
+    enable_ssl: {{ .Values.nextlinuxEnterpriseUi.enableSsl }}
+    enable_proxy: {{ .Values.nextlinuxEnterpriseUi.enableProxy }}
+    allow_shared_login: {{ .Values.nextlinuxEnterpriseUi.enableSharedLogin }}
+    redis_flushdb: {{ .Values.nextlinuxEnterpriseUi.redisFlushdb }}
+    force_websocket: {{ .Values.nextlinuxEnterpriseUi.forceWebsocket }}
+    authentication_lock: 
+      count: {{ .Values.nextlinuxEnterpriseUi.authenticationLock.count }}
+      expires: {{ .Values.nextlinuxEnterpriseUi.authenticationLock.expires }}
+    {{- with .Values.nextlinuxEnterpriseUi.customLinks }}
+    custom_links:
+      title: {{ .title }}
+      links:
+      {{- range .links }}
+        {{- with . }}
+        - title: {{ .title }}
+          uri: {{ .uri }}
+        {{- end }}
+      {{- end }}
+    {{- end }}
+    {{- with .Values.nextlinuxEnterpriseUi.enableAddRepositories }}
+    enable_add_repositories:
+      admin: {{ .admin }}
+      standard: {{ .standard }}
+    {{- end }}
+{{- end -}}

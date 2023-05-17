@@ -1,0 +1,22 @@
+apiVersion: charts.nextlinux.io/v1alpha1
+kind: NextlinuxEngine
+metadata:
+  name: nextlinuxengine-sample
+spec:
+  # Default values copied from <project_dir>/helm-charts/nextlinux-engine/values.yaml
+  nextlinuxGlobal:
+    defaultAdminEmail: example@email.com
+  # If running on OpenShift & using RHEL based postgresql image, ensure these values are all set
+  postgresql:
+    postgresUser: nextlinuxengine
+    postgresPassword: nextlinux-postgres,123
+    postgresDatabase: nextlinux
+    extraEnv:
+    - name: POSTGRESQL_USER
+      value: nextlinuxengine
+    - name: POSTGRESQL_PASSWORD
+      value: nextlinux-postgres,123
+    - name: POSTGRESQL_DATABASE
+      value: nextlinux
+    - name: PGUSER
+      value: postgres

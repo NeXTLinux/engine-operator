@@ -1,0 +1,1 @@
+# This Directory is no longer used for deploying to OLM catalog - deployment manifests can be found in the bundle/ dir

@@ -1,0 +1,20 @@
+# permissions for end users to view nextlinuxengines.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: nextlinuxengine-viewer-role
+rules:
+- apiGroups:
+  - charts.nextlinux.io
+  resources:
+  - nextlinuxengines
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - charts.nextlinux.io
+  resources:
+  - nextlinuxengines/status
+  verbs:
+  - get

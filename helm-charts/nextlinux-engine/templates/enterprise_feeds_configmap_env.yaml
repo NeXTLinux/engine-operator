@@ -1,0 +1,31 @@
+{{- if and .Values.nextlinuxEnterpriseGlobal.enabled .Values.nextlinuxEnterpriseFeeds.enabled -}}
+{{- $component := "enterprise-feeds" -}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ template "nextlinux-engine.enterprise-feeds.fullname" . }}-env
+  labels:
+    app: {{ template "nextlinux-engine.fullname" . }}
+    chart: {{ .Chart.Name }}-{{ .Chart.Version }}
+    release: {{ .Release.Name }}
+    heritage: {{ .Release.Service }}
+    component: {{ $component }}
+    {{- with .Values.nextlinuxGlobal.labels }}
+    {{ toYaml . | nindent 4 }}
+    {{- end }}
+data:
+  NEXTLINUX_DB_NAME: {{ index .Values "nextlinux-feeds-db" "postgresDatabase" | quote }}
+  NEXTLINUX_DB_USER: {{ index .Values "nextlinux-feeds-db" "postgresUser"  | quote }}
+  {{- if and (index .Values "nextlinux-feeds-db" "externalEndpoint") (not (index .Values "nextlinux-feeds-db" "enabled")) }}
+  NEXTLINUX_DB_HOST: {{ index .Values "nextlinux-feeds-db" "externalEndpoint" | quote }}
+  {{- else if and (index .Values "cloudsql" "enabled") (not (index .Values "nextlinux-feeds-db" "enabled")) }}
+  NEXTLINUX_DB_HOST: "localhost:5432"
+  {{- else }}
+  NEXTLINUX_DB_HOST: "{{ template "postgres.nextlinux-feeds-db.fullname" . }}:5432"
+  {{- end }}
+  {{- if .Values.nextlinuxEnterpriseFeeds.gemDriverEnabled }}
+  NEXTLINUX_GEM_DB_NAME: {{ index .Values "nextlinux-feeds-gem-db" "postgresDatabase" | quote }}
+  NEXTLINUX_GEM_DB_USER: {{ index .Values "nextlinux-feeds-gem-db" "postgresUser" | quote }}
+  NEXTLINUX_GEM_DB_HOST: "{{ default (include "postgres.nextlinux-feeds-gem-db.fullname" .) (index .Values "nextlinux-feeds-gem-db" "externalEndpoint") }}:5432"
+  {{- end }}
+{{- end }}

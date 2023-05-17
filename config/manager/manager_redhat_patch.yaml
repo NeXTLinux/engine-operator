@@ -1,0 +1,15 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: controller-manager
+  namespace: system
+spec:
+  template:
+    spec:
+      containers:
+        - name: manager
+          env:
+          - name: RELATED_IMAGE_NEXTLINUX_ENGINE
+            value: registry.connect.redhat.com/nextlinux/engine0:v1.0.0-r0
+          - name: RELATED_IMAGE_NEXTLINUX_POSTGRESQL
+            value: registry.redhat.io/rhel8/postgresql-96:latest

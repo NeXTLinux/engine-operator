@@ -1,0 +1,211 @@
+{{- if and .Values.nextlinuxEnterpriseGlobal.enabled .Values.nextlinuxEnterpriseUi.enabled -}}
+{{- $component := "enterprise-ui" -}}
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "nextlinux-engine.enterprise-ui.fullname" . }}
+  labels:
+    app: {{ include "nextlinux-engine.fullname" . }}
+    component: {{ $component }}
+    chart: {{ .Chart.Name }}-{{ .Chart.Version }}
+    release: {{ .Release.Name }}
+    heritage: {{ .Release.Service }}
+    {{- with .Values.nextlinuxEnterpriseUi.labels }}
+    {{ toYaml . | nindent 4 }}
+    {{- end }}
+    {{- with .Values.nextlinuxGlobal.labels }}
+    {{ toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  selector:
+    matchLabels:
+      app: {{ template "nextlinux-engine.fullname" . }}
+      component: {{ $component }}
+  replicas: 1
+  strategy:
+    type: Recreate
+    rollingUpdate: null
+  template:
+    metadata:
+      labels:
+        app: {{ template "nextlinux-engine.fullname" . }}
+        component: {{ $component }}
+        chart: "{{ .Chart.Name }}-{{ .Chart.Version }}"
+        release: {{ .Release.Name }}
+        heritage: {{ .Release.Service }}
+        {{- with .Values.nextlinuxEnterpriseUi.labels }}
+        {{ toYaml . | nindent 8 }}
+        {{- end }}
+        {{- with .Values.nextlinuxGlobal.labels }}
+        {{ toYaml . | nindent 8 }}
+        {{- end }}
+      annotations:
+      {{- with .Values.nextlinuxGlobal.annotations }}
+        {{ toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.nextlinuxEnterpriseUi.annotations }}
+        {{ toYaml . | nindent 8 }}
+      {{- end }}
+      {{- if not .Values.inject_secrets_via_env }}
+        checksum/secrets: {{ include (print $.Template.BasePath "/enterprise_ui_secret.yaml") . | sha256sum }}
+      {{- end }}
+        checksum/ui-config: {{ include (print $.Template.BasePath "/enterprise_ui_configmap.yaml") . | sha256sum }}
+    spec:
+      {{- with .Values.nextlinuxGlobal.securityContext }}
+      securityContext:
+        {{ toYaml . | nindent 8 }}
+      {{- end }}
+      imagePullSecrets:
+      - name: {{ .Values.nextlinuxEnterpriseGlobal.imagePullSecretName }}
+      containers:
+      {{- if .Values.cloudsql.enabled  }}
+      - name: cloudsql-proxy
+        image: {{ .Values.cloudsql.image.repository }}:{{ .Values.cloudsql.image.tag }}
+        imagePullPolicy: {{ .Values.cloudsql.image.pullPolicy }}
+        command: ["/cloud_sql_proxy"]
+        args:
+        - "-instances={{ .Values.cloudsql.instance }}=tcp:5432"
+        {{- if .Values.cloudsql.useExistingServiceAcc }}
+        - "-credential_file=/var/{{ .Values.cloudsql.serviceAccSecretName }}/{{ .Values.cloudsql.serviceAccJsonName }}"
+        volumeMounts:
+        - mountPath: /var/{{ .Values.cloudsql.serviceAccSecretName }}
+          name: {{ .Values.cloudsql.serviceAccSecretName }}
+          readOnly: true
+        {{- end }}
+      {{- end }}
+      - name: "{{ .Chart.Name }}-{{ $component }}"
+        image: {{ .Values.nextlinuxEnterpriseUi.image }}
+        imagePullPolicy: {{ .Values.nextlinuxEnterpriseUi.imagePullPolicy }}
+        env:
+        {{- if and (index .Values "nextlinuxEnterpriseUi" "existingSecret") (not (index .Values "nextlinux-ui-redis" "externalEndpoint")) }}
+        - name: NEXTLINUX_REDIS_URI
+          value: redis://nouser:{{ index .Values "nextlinux-ui-redis" "password" }}@{{ template "redis.fullname" . }}-master:6379
+        {{- end }}
+        {{ if .Values.nextlinuxGlobal.dbConfig.ssl }}
+        - name: PGSSLROOTCERT
+          value: /home/nextlinux/certs/{{ .Values.nextlinuxGlobal.dbConfig.sslRootCertName }}
+        {{- end }}
+        {{ with .Values.nextlinuxEnterpriseUi.ldapsRootCaCertName }}
+        - name: NODE_EXTRA_CA_CERTS
+          value: /home/nextlinux/certs/{{- . }}
+        {{- end }}
+        {{- with .Values.nextlinuxGlobal.extraEnv }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+        {{- with .Values.nextlinuxEnterpriseUi.extraEnv }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+        envFrom:
+        {{- if not .Values.inject_secrets_via_env }}
+        {{- if .Values.nextlinuxEnterpriseUi.existingSecret }}
+        - secretRef:
+            name: {{ .Values.nextlinuxEnterpriseUi.existingSecret }}
+        {{- else }}
+        - secretRef:
+            name: {{ include "nextlinux-engine.enterprise-ui.fullname" . }}
+        - secretRef:
+            name: {{ print (include "nextlinux-engine.fullname" .) "-admin-pass" }}
+        {{- end }}
+        {{- end }}
+        ports:
+        - containerPort: 3000
+          protocol: TCP
+          name: enterprise-ui
+        volumeMounts:
+        - name: nextlinux-license
+          mountPath: /home/nextlinux/license.yaml
+          subPath: license.yaml
+        - name: nextlinux-ui-config
+          mountPath: /config/config-ui.yaml
+          subPath: config-ui.yaml
+        {{- if (.Values.nextlinuxGlobal.certStoreSecretName) }}
+        - name: certs
+          mountPath: /home/nextlinux/certs/
+          readOnly: true
+        {{- end }}
+        livenessProbe:
+          tcpSocket:
+            port: enterprise-ui
+          initialDelaySeconds: {{ .Values.nextlinuxGlobal.probes.liveness.initialDelaySeconds }}
+          timeoutSeconds: {{ .Values.nextlinuxGlobal.probes.liveness.timeoutSeconds }}
+          periodSeconds: {{ .Values.nextlinuxGlobal.probes.liveness.periodSeconds }}
+          failureThreshold: {{ .Values.nextlinuxGlobal.probes.liveness.failureThreshold }}
+          successThreshold: {{ .Values.nextlinuxGlobal.probes.liveness.successThreshold }}
+        readinessProbe:
+          httpGet:
+            path: /service/health
+            port: enterprise-ui
+          timeoutSeconds: {{ .Values.nextlinuxGlobal.probes.readiness.timeoutSeconds }}
+          periodSeconds: {{ .Values.nextlinuxGlobal.probes.readiness.periodSeconds }}
+          failureThreshold: {{ .Values.nextlinuxGlobal.probes.readiness.failureThreshold }}
+          successThreshold: {{ .Values.nextlinuxGlobal.probes.readiness.successThreshold }}
+        resources:
+          {{ toYaml .Values.nextlinuxEnterpriseUi.resources | nindent 10 }}
+      volumes:
+      - name: nextlinux-license
+        secret:
+          secretName: {{ .Values.nextlinuxEnterpriseGlobal.licenseSecretName }}
+      - name: nextlinux-ui-config
+        configMap:
+          name: {{ template "nextlinux-engine.enterprise-ui.fullname" . }}
+      {{- with .Values.nextlinuxGlobal.certStoreSecretName }}
+      - name: certs
+        secret:
+          secretName: {{ . }}
+      {{- end }}
+      {{- if .Values.cloudsql.useExistingServiceAcc }}
+      - name: {{ .Values.cloudsql.serviceAccSecretName }}
+        secret:
+          secretName: {{ .Values.cloudsql.serviceAccSecretName }}
+      {{- end }}
+      {{- with .Values.nextlinuxEnterpriseUi.nodeSelector }}
+      nodeSelector:
+        {{ toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.nextlinuxEnterpriseUi.affinity }}
+      affinity:
+        {{ toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.nextlinuxEnterpriseUi.tolerations }}
+      tolerations:
+        {{ toYaml . | nindent 8 }}
+     {{- end }}
+     {{- with .Values.nextlinuxGlobal.serviceAccountName }}
+      serviceAccountName: {{ . }}
+      {{- end }}
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "nextlinux-engine.enterprise-ui.fullname" . | quote }}
+  labels:
+    app: {{ template "nextlinux-engine.fullname" . }}
+    component: {{ $component }}
+    chart: {{ .Chart.Name }}-{{ .Chart.Version }}
+    release: {{ .Release.Name }}
+    heritage: {{ .Release.Service }}
+    {{- with .Values.nextlinuxEnterpriseUi.service.labels }}
+    {{ toYaml . | nindent 4 }}
+    {{- end }}
+    {{- with .Values.nextlinuxGlobal.labels }}
+    {{ toYaml . | nindent 4 }}
+    {{- end }}
+  {{- with .Values.nextlinuxEnterpriseUi.service.annotations }}
+  annotations:
+    {{ toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  sessionAffinity: {{ .Values.nextlinuxEnterpriseUi.service.sessionAffinity }}
+  type: {{ .Values.nextlinuxEnterpriseUi.service.type }}
+  ports:
+    - name: enterprise-ui
+      port: {{ .Values.nextlinuxEnterpriseUi.service.port }}
+      protocol: TCP
+      targetPort: 3000
+  selector:
+    app: {{ template "nextlinux-engine.fullname" . }}
+    component: {{ $component }}
+
+{{- end -}}

@@ -1,0 +1,596 @@
+{{- $component := "api" -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ template "nextlinux-engine.api.fullname" . }}
+  labels:
+    app: {{ template "nextlinux-engine.fullname" . }}
+    component: {{ $component }}
+    chart: {{ .Chart.Name }}-{{ .Chart.Version }}
+    release: {{ .Release.Name }}
+    heritage: {{ .Release.Service }}
+    {{- with .Values.nextlinuxApi.labels }}
+    {{ toYaml . | nindent 4 }}
+    {{- end }}
+    {{- with .Values.nextlinuxGlobal.labels }}
+    {{ toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  selector:
+    matchLabels:
+      app: {{ template "nextlinux-engine.fullname" . }}
+      component: {{ $component }}
+  replicas: {{ .Values.nextlinuxApi.replicaCount }}
+  strategy:
+    type: Recreate
+    rollingUpdate: null
+  template:
+    metadata:
+      labels:
+        app: {{ template "nextlinux-engine.fullname" . }}
+        component: {{ $component }}
+        {{- with .Values.nextlinuxApi.labels }}
+        {{ toYaml . | nindent 8 }}
+        {{- end }}
+        {{- with .Values.nextlinuxGlobal.labels }}
+        {{ toYaml . | nindent 8 }}
+        {{- end }}
+      annotations:
+      {{- with .Values.nextlinuxGlobal.annotations }}
+        {{ toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.nextlinuxApi.annotations }}
+        {{ toYaml . | nindent 8 }}
+      {{- end }}
+      {{- if not .Values.inject_secrets_via_env }}
+        checksum/secrets: {{ include (print $.Template.BasePath "/engine_secret.yaml") . | sha256sum }}
+      {{- end }}
+        checksum/env: {{ include (print $.Template.BasePath "/engine_configmap_env.yaml") . | sha256sum }}
+        checksum/engine-config: {{ include (print $.Template.BasePath "/engine_configmap.yaml") . | sha256sum }}
+      {{- if .Values.nextlinuxGlobal.policyBundles }}
+        checksum/policy-config: {{ include (print $.Template.BasePath "/policy_bundle_configmap.yaml") . | sha256sum }}
+      {{- end }}
+    spec:
+      {{- with .Values.nextlinuxGlobal.securityContext }}
+      securityContext:
+        {{ toYaml . | nindent 8 }}
+      {{- end }}
+    {{- if .Values.nextlinuxEnterpriseGlobal.enabled }}
+      imagePullSecrets:
+      - name: {{ .Values.nextlinuxEnterpriseGlobal.imagePullSecretName }}
+    {{- else }}
+      {{- with .Values.nextlinuxGlobal.imagePullSecretName }}
+      imagePullSecrets:
+      - name: {{ . }}
+      {{- end }}
+    {{- end }}
+      containers:
+      {{- if .Values.cloudsql.enabled  }}
+      - name: cloudsql-proxy
+        image: {{ .Values.cloudsql.image.repository }}:{{ .Values.cloudsql.image.tag }}
+        imagePullPolicy: {{ .Values.cloudsql.image.pullPolicy }}
+        command: ["/cloud_sql_proxy"]
+        args:
+        - "-instances={{ .Values.cloudsql.instance }}=tcp:5432"
+        {{- if .Values.cloudsql.useExistingServiceAcc }}
+        - "-credential_file=/var/{{ .Values.cloudsql.serviceAccSecretName }}/{{ .Values.cloudsql.serviceAccJsonName }}"
+        volumeMounts:
+        - mountPath: /var/{{ .Values.cloudsql.serviceAccSecretName }}
+          name: {{ .Values.cloudsql.serviceAccSecretName }}
+          readOnly: true
+        {{- end }}
+      {{- end }}
+      - name: "{{ .Chart.Name }}-{{ $component }}"
+        {{- if .Values.nextlinuxEnterpriseGlobal.enabled }}
+        image: {{ .Values.nextlinuxEnterpriseGlobal.image }}
+        imagePullPolicy: {{ .Values.nextlinuxEnterpriseGlobal.imagePullPolicy }}
+        {{- else }}
+        image: {{ .Values.nextlinuxGlobal.image }}
+        imagePullPolicy: {{ .Values.nextlinuxGlobal.imagePullPolicy }}
+        {{- end }}
+        {{- if .Values.nextlinuxEnterpriseGlobal.enabled }}
+        args: ["nextlinux-enterprise-manager", "service", "start", "--no-auto-upgrade", "apiext"]
+        {{- else }}
+        args: ["nextlinux-manager", "service", "start", "--no-auto-upgrade", "apiext"]
+        {{- end }}
+        envFrom:
+        {{- if not .Values.inject_secrets_via_env }}
+        {{- if .Values.nextlinuxGlobal.existingSecret }}
+        - secretRef:
+            name: {{ .Values.nextlinuxGlobal.existingSecret }}
+        {{- else }}
+        - secretRef:
+            name: {{ include "nextlinux-engine.fullname" . }}
+        - secretRef:
+            name: {{ print (include "nextlinux-engine.fullname" .) "-admin-pass" }}
+        {{- end }}
+        {{- end }}
+        - configMapRef:
+            name: {{ template "nextlinux-engine.fullname" . }}-env
+        env:
+        {{- with .Values.nextlinuxGlobal.extraEnv }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+        {{- with .Values.nextlinuxApi.extraEnv }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+        - name: NEXTLINUX_POD_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        {{- if not .Values.inject_secrets_via_env }}
+        - name: NEXTLINUX_CLI_PASS
+          valueFrom:
+            secretKeyRef:
+              name: {{ default (print (include "nextlinux-engine.fullname" .) "-admin-pass") .Values.nextlinuxGlobal.existingSecret }}
+              key: NEXTLINUX_ADMIN_PASSWORD
+        {{- end }}
+        ports:
+        - containerPort: {{ .Values.nextlinuxApi.service.port }}
+          name: external-api
+        volumeMounts:
+        {{- if .Values.nextlinuxEnterpriseGlobal.enabled }}
+        - name: nextlinux-license
+          mountPath: /home/nextlinux/license.yaml
+          subPath: license.yaml
+        {{- end }}
+        - name: config-volume
+          mountPath: /config/config.yaml
+          subPath: config.yaml
+        {{- if .Values.nextlinuxGlobal.policyBundles }}
+        {{- range $key, $value := .Values.nextlinuxGlobal.policyBundles }}
+        - name: policy-bundle-volume
+          mountPath: {{ $.Values.nextlinuxGlobal.serviceDir  }}/bundles/{{ $key }}
+          subPath: {{ $key }}
+        {{- end }}
+        {{- end }}
+        {{- if .Values.nextlinuxGlobal.openShiftDeployment }}
+        - name: service-config-volume
+          mountPath: /nextlinux_service_config
+        - name: logs
+          mountPath: /var/log/nextlinux
+        - name: run
+          mountPath: /var/run/nextlinux
+        {{- end }}
+        {{- if (.Values.nextlinuxGlobal.certStoreSecretName) }}
+        - name: certs
+          mountPath: /home/nextlinux/certs/
+          readOnly: true
+        {{- end }}
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: external-api
+            {{- if .Values.nextlinuxGlobal.internalServicesSsl.enabled }}
+            scheme: HTTPS
+            {{- end }}
+          initialDelaySeconds: {{ .Values.nextlinuxGlobal.probes.liveness.initialDelaySeconds }}
+          timeoutSeconds: {{ .Values.nextlinuxGlobal.probes.liveness.timeoutSeconds }}
+          periodSeconds: {{ .Values.nextlinuxGlobal.probes.liveness.periodSeconds }}
+          failureThreshold: {{ .Values.nextlinuxGlobal.probes.liveness.failureThreshold }}
+          successThreshold: {{ .Values.nextlinuxGlobal.probes.liveness.successThreshold }}
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: external-api
+            {{- if .Values.nextlinuxGlobal.internalServicesSsl.enabled }}
+            scheme: HTTPS
+            {{- end }}
+          timeoutSeconds: {{ .Values.nextlinuxGlobal.probes.readiness.timeoutSeconds }}
+          periodSeconds: {{ .Values.nextlinuxGlobal.probes.readiness.periodSeconds }}
+          failureThreshold: {{ .Values.nextlinuxGlobal.probes.readiness.failureThreshold }}
+          successThreshold: {{ .Values.nextlinuxGlobal.probes.readiness.successThreshold }}
+        resources:
+          {{ toYaml .Values.nextlinuxApi.resources | nindent 10 }}
+      {{- if and .Values.nextlinuxEnterpriseGlobal.enabled .Values.nextlinuxEnterpriseRbac.enabled }}
+      - name: {{ .Chart.Name }}-rbac-manager
+        image: {{ .Values.nextlinuxEnterpriseGlobal.image }}
+        imagePullPolicy: {{ .Values.nextlinuxEnterpriseGlobal.imagePullPolicy }}
+        args: ["nextlinux-enterprise-manager", "service", "start", "--no-auto-upgrade", "rbac_manager"]
+        envFrom:
+        {{- if not .Values.inject_secrets_via_env }}
+        {{- if .Values.nextlinuxGlobal.existingSecret }}
+        - secretRef:
+            name: {{ .Values.nextlinuxGlobal.existingSecret }}
+        {{- else }}
+        - secretRef:
+            name: {{ include "nextlinux-engine.fullname" . }}
+        - secretRef:
+            name: {{ print (include "nextlinux-engine.fullname" .) "-admin-pass" }}
+        {{- end }}
+        {{- end }}
+        - configMapRef:
+            name: {{ template "nextlinux-engine.fullname" . }}-env
+        env:
+        {{- with .Values.nextlinuxGlobal.extraEnv }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+        {{- with .Values.nextlinuxEnterpriseRbac.extraEnv }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+        - name: NEXTLINUX_POD_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        ports:
+        - containerPort: {{ .Values.nextlinuxEnterpriseRbac.service.apiPort }}
+          name: rbac-manager
+        volumeMounts:
+        - name: nextlinux-license
+          mountPath: /home/nextlinux/license.yaml
+          subPath: license.yaml
+        - name: enterprise-config-volume
+          mountPath: /config/config.yaml
+          subPath: config.yaml
+        {{- if (.Values.nextlinuxGlobal.certStoreSecretName) }}
+        - name: certs
+          mountPath: /home/nextlinux/certs/
+          readOnly: true
+        {{- end }}
+        {{- if .Values.nextlinuxGlobal.openShiftDeployment }}
+        - name: service-config-volume
+          mountPath: /nextlinux_service_config
+        - name: logs
+          mountPath: /var/log/nextlinux
+        - name: run
+          mountPath: /var/run/nextlinux
+        {{- end }}
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: rbac-manager
+            {{- if .Values.nextlinuxGlobal.internalServicesSsl.enabled }}
+            scheme: HTTPS
+            {{- end }}
+          initialDelaySeconds: {{ .Values.nextlinuxGlobal.probes.liveness.initialDelaySeconds }}
+          timeoutSeconds: {{ .Values.nextlinuxGlobal.probes.liveness.timeoutSeconds }}
+          periodSeconds: {{ .Values.nextlinuxGlobal.probes.liveness.periodSeconds }}
+          failureThreshold: {{ .Values.nextlinuxGlobal.probes.liveness.failureThreshold }}
+          successThreshold: {{ .Values.nextlinuxGlobal.probes.liveness.successThreshold }}
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: rbac-manager
+            {{- if .Values.nextlinuxGlobal.internalServicesSsl.enabled }}
+            scheme: HTTPS
+            {{- end }}
+          timeoutSeconds: {{ .Values.nextlinuxGlobal.probes.readiness.timeoutSeconds }}
+          periodSeconds: {{ .Values.nextlinuxGlobal.probes.readiness.periodSeconds }}
+          failureThreshold: {{ .Values.nextlinuxGlobal.probes.readiness.failureThreshold }}
+          successThreshold: {{ .Values.nextlinuxGlobal.probes.readiness.successThreshold }}
+        resources:
+          {{ toYaml .Values.nextlinuxEnterpriseRbac.managerResources | nindent 10 }}
+      - name: {{ .Chart.Name }}-rbac-authorizer
+        image: {{ .Values.nextlinuxEnterpriseGlobal.image }}
+        imagePullPolicy: {{ .Values.nextlinuxEnterpriseGlobal.imagePullPolicy }}
+        args: ["nextlinux-enterprise-manager", "service", "start", "--no-auto-upgrade", "rbac_authorizer"]
+        envFrom:
+        {{- if not .Values.inject_secrets_via_env }}
+        {{- if .Values.nextlinuxGlobal.existingSecret }}
+        - secretRef:
+            name: {{ .Values.nextlinuxGlobal.existingSecret }}
+        {{- else }}
+        - secretRef:
+            name: {{ include "nextlinux-engine.fullname" . }}
+        - secretRef:
+            name: {{ print (include "nextlinux-engine.fullname" .) "-admin-pass" }}
+        {{- end }}
+        {{- end }}
+        - configMapRef:
+            name: {{ template "nextlinux-engine.fullname" . }}-env
+        env:
+        {{- with .Values.nextlinuxGlobal.extraEnv }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+        {{- with .Values.nextlinuxEnterpriseRbac.extraEnv }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+        - name: NEXTLINUX_POD_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        ports:
+        - containerPort: {{ .Values.nextlinuxEnterpriseRbac.service.authPort }}
+          name: rbac-auth
+        volumeMounts:
+        - name: nextlinux-license
+          mountPath: /home/nextlinux/license.yaml
+          subPath: license.yaml
+        - name: enterprise-config-volume
+          mountPath: /config/config.yaml
+          subPath: config.yaml
+        {{- if (.Values.nextlinuxGlobal.certStoreSecretName) }}
+        - name: certs
+          mountPath: /home/nextlinux/certs/
+          readOnly: true
+        {{- end }}
+        {{- if .Values.nextlinuxGlobal.openShiftDeployment }}
+        - name: service-config-volume
+          mountPath: /nextlinux_service_config
+        - name: logs
+          mountPath: /var/log/nextlinux
+        - name: run
+          mountPath: /var/run/nextlinux
+        {{- end }}
+        livenessProbe:
+          exec:
+            command:
+              - curl
+              - -f
+              - 'localhost:{{ .Values.nextlinuxEnterpriseRbac.service.authPort }}/health'
+          initialDelaySeconds: {{ .Values.nextlinuxGlobal.probes.liveness.initialDelaySeconds }}
+          timeoutSeconds: {{ .Values.nextlinuxGlobal.probes.liveness.timeoutSeconds }}
+          periodSeconds: {{ .Values.nextlinuxGlobal.probes.liveness.periodSeconds }}
+          failureThreshold: {{ .Values.nextlinuxGlobal.probes.liveness.failureThreshold }}
+          successThreshold: {{ .Values.nextlinuxGlobal.probes.liveness.successThreshold }}
+        readinessProbe:
+          exec:
+            command:
+              - curl
+              - -f
+              - 'localhost:{{ .Values.nextlinuxEnterpriseRbac.service.authPort }}/health'
+          timeoutSeconds: {{ .Values.nextlinuxGlobal.probes.readiness.timeoutSeconds }}
+          periodSeconds: {{ .Values.nextlinuxGlobal.probes.readiness.periodSeconds }}
+          failureThreshold: {{ .Values.nextlinuxGlobal.probes.readiness.failureThreshold }}
+          successThreshold: {{ .Values.nextlinuxGlobal.probes.readiness.successThreshold }}
+        resources:
+          {{ toYaml .Values.nextlinuxEnterpriseRbac.authResources | nindent 10 }}
+      {{- end }}
+      {{- if and .Values.nextlinuxEnterpriseGlobal.enabled .Values.nextlinuxEnterpriseReports.enabled }}
+      - name: "{{ .Chart.Name }}-reports"
+        image: {{ .Values.nextlinuxEnterpriseGlobal.image }}
+        imagePullPolicy: {{ .Values.nextlinuxEnterpriseGlobal.imagePullPolicy }}
+        args: ["nextlinux-enterprise-manager", "service", "start", "--no-auto-upgrade", "reports"]
+        ports:
+        - containerPort: {{ .Values.nextlinuxEnterpriseReports.service.port }}
+          name: reports-api
+        envFrom:
+        {{- if not .Values.inject_secrets_via_env }}
+        {{- if .Values.nextlinuxGlobal.existingSecret }}
+        - secretRef:
+            name: {{ .Values.nextlinuxGlobal.existingSecret }}
+        {{- else }}
+        - secretRef:
+            name: {{ include "nextlinux-engine.fullname" . }}
+        - secretRef:
+            name: {{ print (include "nextlinux-engine.fullname" .) "-admin-pass" }}
+        {{- end }}
+        {{- end }}
+        - configMapRef:
+            name: {{ template "nextlinux-engine.fullname" . }}-env
+        env:
+        {{- with .Values.nextlinuxGlobal.extraEnv }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+        {{- with .Values.nextlinuxEnterpriseReports.extraEnv }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+        - name: NEXTLINUX_POD_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        volumeMounts:
+        - name: enterprise-config-volume
+          mountPath: /config/config.yaml
+          subPath: config.yaml
+        - name: nextlinux-license
+          mountPath: /home/nextlinux/license.yaml
+          subPath: license.yaml
+        {{- if (.Values.nextlinuxGlobal.certStoreSecretName) }}
+        - name: certs
+          mountPath: /home/nextlinux/certs/
+          readOnly: true
+        {{- end }}
+        {{- if .Values.nextlinuxGlobal.openShiftDeployment }}
+        - name: service-config-volume
+          mountPath: /nextlinux_service_config
+        - name: logs
+          mountPath: /var/log/nextlinux
+        - name: run
+          mountPath: /var/run/nextlinux
+        {{- end }}
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: reports-api
+            {{- if .Values.nextlinuxGlobal.internalServicesSsl.enabled }}
+            scheme: HTTPS
+            {{- end }}
+          initialDelaySeconds: {{ .Values.nextlinuxGlobal.probes.liveness.initialDelaySeconds }}
+          timeoutSeconds: {{ .Values.nextlinuxGlobal.probes.liveness.timeoutSeconds }}
+          periodSeconds: {{ .Values.nextlinuxGlobal.probes.liveness.periodSeconds }}
+          failureThreshold: {{ .Values.nextlinuxGlobal.probes.liveness.failureThreshold }}
+          successThreshold: {{ .Values.nextlinuxGlobal.probes.liveness.successThreshold }}
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: reports-api
+            {{- if .Values.nextlinuxGlobal.internalServicesSsl.enabled }}
+            scheme: HTTPS
+            {{- end }}
+          timeoutSeconds: {{ .Values.nextlinuxGlobal.probes.readiness.timeoutSeconds }}
+          periodSeconds: {{ .Values.nextlinuxGlobal.probes.readiness.periodSeconds }}
+          failureThreshold: {{ .Values.nextlinuxGlobal.probes.readiness.failureThreshold }}
+          successThreshold: {{ .Values.nextlinuxGlobal.probes.readiness.successThreshold }}
+        resources:
+          {{ toYaml .Values.nextlinuxEnterpriseReports.resources | nindent 10 }}
+      {{- end }}
+      {{- if and .Values.nextlinuxEnterpriseGlobal.enabled .Values.nextlinuxEnterpriseNotifications.enabled }}
+      - name: "{{ .Chart.Name }}-notifications"
+        image: {{ .Values.nextlinuxEnterpriseGlobal.image }}
+        imagePullPolicy: {{ .Values.nextlinuxEnterpriseGlobal.imagePullPolicy }}
+        args: ["nextlinux-enterprise-manager", "service", "start", "--no-auto-upgrade", "notifications"]
+        ports:
+        - containerPort: {{ .Values.nextlinuxEnterpriseNotifications.service.port }}
+          name: notifi-api
+        envFrom:
+        {{- if not .Values.inject_secrets_via_env }}
+        {{- if .Values.nextlinuxGlobal.existingSecret }}
+        - secretRef:
+            name: {{ .Values.nextlinuxGlobal.existingSecret }}
+        {{- else }}
+        - secretRef:
+            name: {{ include "nextlinux-engine.fullname" . }}
+        - secretRef:
+            name: {{ print (include "nextlinux-engine.fullname" .) "-admin-pass" }}
+        {{- end }}
+        {{- end }}
+        - configMapRef:
+            name: {{ template "nextlinux-engine.fullname" . }}-env
+        env:
+        {{- with .Values.nextlinuxGlobal.extraEnv }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+        {{- with .Values.nextlinuxEnterpriseNotifications.extraEnv }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+        - name: NEXTLINUX_POD_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        volumeMounts:
+        - name: enterprise-config-volume
+          mountPath: /config/config.yaml
+          subPath: config.yaml
+        - name: nextlinux-license
+          mountPath: /home/nextlinux/license.yaml
+          subPath: license.yaml
+        {{- if (.Values.nextlinuxGlobal.certStoreSecretName) }}
+        - name: certs
+          mountPath: /home/nextlinux/certs/
+          readOnly: true
+        {{- end }}
+        {{- if .Values.nextlinuxGlobal.openShiftDeployment }}
+        - name: service-config-volume
+          mountPath: /nextlinux_service_config
+        - name: logs
+          mountPath: /var/log/nextlinux
+        - name: run
+          mountPath: /var/run/nextlinux
+        {{- end }}
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: notifi-api
+            {{- if .Values.nextlinuxGlobal.internalServicesSsl.enabled }}
+            scheme: HTTPS
+            {{- end }}
+          initialDelaySeconds: {{ .Values.nextlinuxGlobal.probes.liveness.initialDelaySeconds }}
+          timeoutSeconds: {{ .Values.nextlinuxGlobal.probes.liveness.timeoutSeconds }}
+          periodSeconds: {{ .Values.nextlinuxGlobal.probes.liveness.periodSeconds }}
+          failureThreshold: {{ .Values.nextlinuxGlobal.probes.liveness.failureThreshold }}
+          successThreshold: {{ .Values.nextlinuxGlobal.probes.liveness.successThreshold }}
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: notifi-api
+            {{- if .Values.nextlinuxGlobal.internalServicesSsl.enabled }}
+            scheme: HTTPS
+            {{- end }}
+          timeoutSeconds: {{ .Values.nextlinuxGlobal.probes.readiness.timeoutSeconds }}
+          periodSeconds: {{ .Values.nextlinuxGlobal.probes.readiness.periodSeconds }}
+          failureThreshold: {{ .Values.nextlinuxGlobal.probes.readiness.failureThreshold }}
+          successThreshold: {{ .Values.nextlinuxGlobal.probes.readiness.successThreshold }}
+        resources:
+          {{ toYaml .Values.nextlinuxEnterpriseNotifications.resources | nindent 10 }}
+      {{- end }}
+      volumes:
+        - name: config-volume
+          configMap:
+            name: {{ template "nextlinux-engine.fullname" . }}
+        {{- if .Values.nextlinuxGlobal.policyBundles }}
+        - name: policy-bundle-volume
+          configMap:
+            name: {{ template "nextlinux-engine.fullname" . }}-policy-bundles
+        {{- end }}
+        {{- if .Values.nextlinuxGlobal.openShiftDeployment }}
+        - name: service-config-volume
+          emptyDir: {}
+        - name: logs
+          emptyDir: {}
+        - name: run
+          emptyDir: {}
+        {{- end }}
+        {{ if and .Values.nextlinuxEnterpriseGlobal.enabled (or .Values.nextlinuxEnterpriseRbac.enabled .Values.nextlinuxEnterpriseReports.enabled) }}
+        - name: nextlinux-license
+          secret:
+            secretName: {{ .Values.nextlinuxEnterpriseGlobal.licenseSecretName }}
+        - name: enterprise-config-volume
+          configMap:
+            name: {{ template "nextlinux-engine.enterprise.fullname" . }}
+        {{- end}}
+        {{- with .Values.nextlinuxGlobal.certStoreSecretName }}
+        - name: certs
+          secret:
+            secretName: {{ . }}
+        {{- end }}
+        {{- if .Values.cloudsql.useExistingServiceAcc }}
+        - name: {{ .Values.cloudsql.serviceAccSecretName }}
+          secret:
+            secretName: {{ .Values.cloudsql.serviceAccSecretName }}
+        {{- end }}
+      {{- with .Values.nextlinuxApi.nodeSelector }}
+      nodeSelector:
+        {{ toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.nextlinuxApi.affinity }}
+      affinity:
+        {{ toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.nextlinuxApi.tolerations }}
+      tolerations:
+        {{ toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.nextlinuxGlobal.serviceAccountName }}
+      serviceAccountName: {{ . }}
+      {{- end }}
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ template "nextlinux-engine.api.fullname" . }}
+  labels:
+    app: {{ template "nextlinux-engine.fullname" . }}
+    chart: {{ .Chart.Name }}-{{ .Chart.Version }}
+    release: {{ .Release.Name }}
+    heritage: {{ .Release.Service }}
+    component: {{ $component }}
+    {{- with .Values.nextlinuxApi.service.labels }}
+    {{ toYaml . | nindent 4 }}
+    {{- end }}
+    {{- with .Values.nextlinuxGlobal.labels }}
+    {{ toYaml . | nindent 4 }}
+    {{- end }}
+  {{- with .Values.nextlinuxApi.service.annotations }}
+  annotations:
+    {{ toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: {{ .Values.nextlinuxApi.service.type }}
+  ports:
+    - name: nextlinux-external-api
+      port: {{ .Values.nextlinuxApi.service.port }}
+      targetPort: {{ .Values.nextlinuxApi.service.port }}
+      protocol: TCP
+    {{- if and .Values.nextlinuxEnterpriseGlobal.enabled .Values.nextlinuxEnterpriseRbac.enabled }}
+    - name: nextlinux-rbac-manager
+      port: {{ .Values.nextlinuxEnterpriseRbac.service.apiPort }}
+      targetPort: {{ .Values.nextlinuxEnterpriseRbac.service.apiPort }}
+      protocol: TCP
+    {{- end }}
+    {{- if and .Values.nextlinuxEnterpriseGlobal.enabled .Values.nextlinuxEnterpriseReports.enabled }}
+    - name: reports-api
+      port: {{ .Values.nextlinuxEnterpriseReports.service.port }}
+      targetPort: {{ .Values.nextlinuxEnterpriseReports.service.port }}
+      protocol: TCP
+    {{- end }}
+    {{- if and .Values.nextlinuxEnterpriseGlobal.enabled .Values.nextlinuxEnterpriseNotifications.enabled }}
+    - name: notifi-api
+      port: {{ .Values.nextlinuxEnterpriseNotifications.service.port }}
+      targetPort: {{ .Values.nextlinuxEnterpriseNotifications.service.port }}
+      protocol: TCP
+    {{- end }}
+  selector:
+    app: {{ template "nextlinux-engine.fullname" . }}
+    component: {{ $component }}

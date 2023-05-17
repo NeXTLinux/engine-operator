@@ -1,0 +1,305 @@
+{{- $nextlinuxFeedsURL := "https://ancho.re/v1/service/feeds" -}}
+{{- $grypeProviderFeedsExternalURL := "https://toolbox-data.nextlinux.io/grype/databases/listing.json" -}}
+
+{{- if .Values.nextlinuxEnterpriseFeeds.url -}}
+  {{- $urlPathSuffix := (default "" (regexFind "/v1.*$" .Values.nextlinuxEnterpriseFeeds.url)) -}}
+  {{- $nextlinuxFeedsHost := (trimSuffix $urlPathSuffix .Values.nextlinuxEnterpriseFeeds.url) -}}
+  {{- $nextlinuxFeedsURL = (printf "%s/v1/feeds" $nextlinuxFeedsHost) -}}
+  {{- $grypeProviderFeedsExternalURL = (printf "%s/v1/databases/grypedb" $nextlinuxFeedsHost) -}}
+{{- else if and .Values.nextlinuxEnterpriseGlobal.enabled .Values.nextlinuxEnterpriseFeeds.enabled -}}
+  {{- if .Values.nextlinuxGlobal.internalServicesSsl.enabled -}}
+    {{- $nextlinuxFeedsURL = (printf "https://%s:%s/v1/feeds"  (include "nextlinux-engine.enterprise-feeds.fullname" .) (.Values.nextlinuxEnterpriseFeeds.service.port | toString) ) -}}
+    {{- $grypeProviderFeedsExternalURL = (printf "https://%s:%s/v1/databases/grypedb"  (include "nextlinux-engine.enterprise-feeds.fullname" .) (.Values.nextlinuxEnterpriseFeeds.service.port | toString) ) -}}
+  {{- else -}}
+    {{- $nextlinuxFeedsURL = (printf "http://%s:%s/v1/feeds" (include "nextlinux-engine.enterprise-feeds.fullname" .) (.Values.nextlinuxEnterpriseFeeds.service.port | toString) ) -}}
+    {{- $grypeProviderFeedsExternalURL = (printf "http://%s:%s/v1/databases/grypedb"  (include "nextlinux-engine.enterprise-feeds.fullname" .) (.Values.nextlinuxEnterpriseFeeds.service.port | toString) ) -}}
+  {{- end -}}
+{{- end -}}
+
+{{- $vulnerabilityProvider := .Values.nextlinuxPolicyEngine.vulnerabilityProvider -}}
+{{- if not $vulnerabilityProvider -}}
+  {{- if .Release.IsUpgrade -}}
+    {{ required "A vulnerability provider must be explicitly set with .Values.nextlinuxPolicyEngine.vulnerabilityProvider when upgrading to chart version v1.15.0 or higher." .Values.nextlinuxPolicyEngine.vulnerabilityProvider }}
+  {{- else -}}
+    {{- $vulnerabilityProvider = "grype" -}}
+  {{- end -}}
+{{- end -}}
+
+kind: ConfigMap
+apiVersion: v1
+metadata:
+  name: {{ template "nextlinux-engine.fullname" . }}
+  labels:
+    app: {{ template "nextlinux-engine.fullname" . }}
+    chart: {{ .Chart.Name }}-{{ .Chart.Version }}
+    release: {{ .Release.Name }}
+    heritage: {{ .Release.Service }}
+    {{- with .Values.nextlinuxGlobal.labels }}
+    {{ toYaml . | nindent 4 }}
+    {{- end }}
+data:
+  config.yaml: |
+    # Nextlinux Service Configuration File from ConfigMap
+    service_dir: {{ .Values.nextlinuxGlobal.serviceDir }}
+    tmp_dir: {{ .Values.nextlinuxGlobal.scratchVolume.mountPath }}
+    log_level: {{ .Values.nextlinuxGlobal.logLevel }}
+    image_analyze_timeout_seconds: {{ .Values.nextlinuxGlobal.imageAnalyzeTimeoutSeconds }}
+    allow_awsecr_iam_auto: {{ .Values.nextlinuxGlobal.allowECRUseIAMRole }}
+    host_id: "${NEXTLINUX_POD_NAME}"
+    internal_ssl_verify: {{ .Values.nextlinuxGlobal.internalServicesSsl.verifyCerts }}
+    auto_restart_services: false
+
+    {{- if .Values.nextlinuxEnterpriseGlobal.enabled }}
+    license_file: /home/nextlinux/license.yaml
+    {{- end }}
+
+    global_client_connect_timeout: {{ default 0 .Values.nextlinuxGlobal.clientConnectTimeout }}
+    global_client_read_timeout: {{ default 0 .Values.nextlinuxGlobal.clientReadTimeout }}
+    server_request_timeout_seconds: {{ .Values.nextlinuxGlobal.serverRequestTimeout }}
+
+    metrics:
+      enabled: {{ .Values.nextlinuxGlobal.enableMetrics }}
+      auth_disabled: {{ .Values.nextlinuxGlobal.metricsAuthDisabled }}
+    {{ if .Values.nextlinuxGlobal.webhooksEnabled }}
+    webhooks:
+      {{- toYaml .Values.nextlinuxGlobal.webhooks | nindent 6 }}
+    {{ end }}
+
+    default_admin_password: ${NEXTLINUX_ADMIN_PASSWORD}
+    default_admin_email: {{ .Values.nextlinuxGlobal.defaultAdminEmail }}
+
+    # Defines a maximum compressed image size (MB) to be added for analysis
+    # Value < 0 disables feature. Disabled by default
+    max_compressed_image_size_mb: {{ default -1 .Values.nextlinuxGlobal.maxCompressedImageSizeMB }}
+
+    # Locations for keys used for signing and encryption. Only one of 'secret' or 'public_key_path'/'private_key_path' needs to be set. If all are set then the keys take precedence over the secret value
+    # Secret is for a shared secret and if set, all components in nextlinux should have the exact same value in their configs.
+    keys:
+      {{- if or .Values.nextlinuxGlobal.saml.secret .Values.nextlinuxGlobal.saml.useExistingSecret }}
+      secret: ${NEXTLINUX_SAML_SECRET}
+      {{- end }}
+      {{- with .Values.nextlinuxGlobal.saml.publicKeyName }}
+      public_key_path: /home/nextlinux/certs/{{- . }}
+      {{- end }}
+      {{- with .Values.nextlinuxGlobal.saml.privateKeyName }}
+      private_key_path: /home/nextlinux/certs/{{- . }}
+      {{- end }}
+
+    # Configuring supported user authentication and credential management
+    user_authentication:
+      oauth:
+        enabled: {{ .Values.nextlinuxGlobal.oauthEnabled }}
+        default_token_expiration_seconds: {{ .Values.nextlinuxGlobal.oauthTokenExpirationSeconds }}
+
+      # Set this to True to enable storing user passwords only as secure hashes in the db. This can dramatically increase CPU usage if you
+      # don't also use oauth and tokens for internal communications (which requires keys/secret to be configured as well)
+      # WARNING: you should not change this after a system has been initialized as it may cause a mismatch in existing passwords
+      hashed_passwords: {{ .Values.nextlinuxGlobal.hashedPasswords }}
+
+    credentials:
+      database:
+        {{- if not .Values.nextlinuxGlobal.dbConfig.ssl }}
+        db_connect: "postgresql://${NEXTLINUX_DB_USER}:${NEXTLINUX_DB_PASSWORD}@${NEXTLINUX_DB_HOST}/${NEXTLINUX_DB_NAME}"
+        {{- else if eq .Values.nextlinuxGlobal.dbConfig.sslMode "require" }}
+        db_connect: "postgresql://${NEXTLINUX_DB_USER}:${NEXTLINUX_DB_PASSWORD}@${NEXTLINUX_DB_HOST}/${NEXTLINUX_DB_NAME}?sslmode={{- .Values.nextlinuxGlobal.dbConfig.sslMode -}}"
+        {{- else }}
+        db_connect: "postgresql://${NEXTLINUX_DB_USER}:${NEXTLINUX_DB_PASSWORD}@${NEXTLINUX_DB_HOST}/${NEXTLINUX_DB_NAME}?sslmode={{- .Values.nextlinuxGlobal.dbConfig.sslMode -}}&sslrootcert=/home/nextlinux/certs/{{- .Values.nextlinuxGlobal.dbConfig.sslRootCertName -}}"
+        {{- end }}
+        db_connect_args:
+          timeout: {{ .Values.nextlinuxGlobal.dbConfig.timeout }}
+          ssl: false
+        db_pool_size: {{ .Values.nextlinuxGlobal.dbConfig.connectionPoolSize }}
+        db_pool_max_overflow: {{ .Values.nextlinuxGlobal.dbConfig.connectionPoolMaxOverflow }}
+        {{- with .Values.nextlinuxGlobal.dbConfig.engineArgs }}
+        db_engine_args:
+          {{- toYaml . | nindent 10 }}
+        {{- end }}
+    services:
+      apiext:
+        enabled: true
+        require_auth: true
+        endpoint_hostname: {{ template "nextlinux-engine.api.fullname" . }}
+        max_request_threads: {{ default 50 .Values.nextlinuxApi.maxRequestThreads }}
+        listen: 0.0.0.0
+        port: {{ .Values.nextlinuxApi.service.port }}
+        {{- if .Values.nextlinuxApi.external }}
+        {{- if .Values.nextlinuxApi.external.use_tls }}
+        external_tls: {{ .Values.nextlinuxApi.external.use_tls }}
+        {{- end }}
+        {{- if .Values.nextlinuxApi.external.hostname }}
+        external_hostname: {{ .Values.nextlinuxApi.external.hostname }}
+        {{- end }}
+        external_port: {{ .Values.nextlinuxApi.external.port | default "null" }}
+        {{- end }}
+        {{- if and .Values.nextlinuxEnterpriseGlobal.enabled .Values.nextlinuxEnterpriseRbac.enabled }}
+        authorization_handler: external
+        authorization_handler_config:
+          endpoint: "http://localhost:{{- .Values.nextlinuxEnterpriseRbac.service.authPort }}"
+        {{- end }}
+        {{- if .Values.nextlinuxGlobal.internalServicesSsl.enabled }}
+        ssl_enable: {{ .Values.nextlinuxGlobal.internalServicesSsl.enabled }}
+        ssl_cert: "/home/nextlinux/certs/{{- .Values.nextlinuxGlobal.internalServicesSsl.certSecretCertName }}"
+        ssl_key: "/home/nextlinux/certs/{{- .Values.nextlinuxGlobal.internalServicesSsl.certSecretKeyName }}"
+        {{- end }}
+      analyzer:
+        enabled: true
+        require_auth: true
+        endpoint_hostname: {{ template "nextlinux-engine.analyzer.fullname" . }}
+        listen: 0.0.0.0
+        port: {{ .Values.nextlinuxAnalyzer.containerPort }}
+        max_request_threads: {{ default 50 .Values.nextlinuxAnalyzer.maxRequestThreads }}
+        cycle_timer_seconds: 1
+        cycle_timers:
+          {{- toYaml .Values.nextlinuxAnalyzer.cycleTimers | nindent 10 }}
+        max_threads: {{ .Values.nextlinuxAnalyzer.concurrentTasksPerWorker }}
+        analyzer_driver: 'nodocker'
+        {{- if gt .Values.nextlinuxAnalyzer.layerCacheMaxGigabytes 0.0 }}
+        layer_cache_enable: true
+        {{- else }}
+        layer_cache_enable: false
+        {{- end }}
+        layer_cache_max_gigabytes: {{ .Values.nextlinuxAnalyzer.layerCacheMaxGigabytes }}
+        enable_hints: {{ .Values.nextlinuxAnalyzer.enableHints }}
+        {{- if .Values.nextlinuxGlobal.internalServicesSsl.enabled }}
+        ssl_enable: {{ .Values.nextlinuxGlobal.internalServicesSsl.enabled }}
+        ssl_cert: "/home/nextlinux/certs/{{- .Values.nextlinuxGlobal.internalServicesSsl.certSecretCertName }}"
+        ssl_key: "/home/nextlinux/certs/{{- .Values.nextlinuxGlobal.internalServicesSsl.certSecretKeyName }}"
+        {{- end }}
+        enable_owned_package_filtering: {{ .Values.nextlinuxAnalyzer.enableOwnedPackageFiltering }}
+      catalog:
+        enabled: true
+        require_auth: true
+        endpoint_hostname: {{ template "nextlinux-engine.catalog.fullname" . }}
+        listen: 0.0.0.0
+        port: {{ .Values.nextlinuxCatalog.service.port }}
+        max_request_threads: {{ default 50 .Values.nextlinuxCatalog.maxRequestThreads }}
+        cycle_timer_seconds: 1
+        cycle_timers:
+          # Interval to check for an update to a tag
+          image_watcher: {{ .Values.nextlinuxCatalog.cycleTimers.image_watcher }}
+          # Interval to run a policy evaluation on images with the policy_eval subscription activated.
+          policy_eval: {{ .Values.nextlinuxCatalog.cycleTimers.policy_eval }}
+          # Interval to run a vulnerability scan on images with the vuln_update subscription activated.
+          vulnerability_scan: {{ .Values.nextlinuxCatalog.cycleTimers.vulnerability_scan }}
+          # Interval at which the catalog looks for new work to put on the image analysis queue.
+          analyzer_queue: {{ .Values.nextlinuxCatalog.cycleTimers.analyzer_queue }}
+          # Interval at which the catalog archival tasks are triggered.
+          archive_tasks: {{ .Values.nextlinuxCatalog.cycleTimers.archive_tasks }}
+          image_gc: {{ .Values.nextlinuxCatalog.cycleTimers.image_gc }}
+          # Interval notifications will be processed for state changes
+          {{- if and .Values.nextlinuxEnterpriseGlobal.enabled .Values.nextlinuxEnterpriseNotifications.enabled }}
+          notifications: 0
+          {{- else }}
+          notifications: {{ .Values.nextlinuxCatalog.cycleTimers.notifications }}
+          {{- end }}
+          # Intervals service state updates are polled for the system status
+          service_watcher: {{ .Values.nextlinuxCatalog.cycleTimers.service_watcher }}
+          # Interval between checks to repo for new tags
+          repo_watcher: {{ .Values.nextlinuxCatalog.cycleTimers.repo_watcher }}
+          k8s_watcher: {{ .Values.nextlinuxCatalog.cycleTimers.k8s_watcher }}
+          k8s_image_watcher: {{ .Values.nextlinuxCatalog.cycleTimers.k8s_image_watcher }}
+        event_log:
+          {{- toYaml .Values.nextlinuxCatalog.events | nindent 10 }}
+        analysis_archive:
+          {{- toYaml .Values.nextlinuxCatalog.analysis_archive | nindent 10 }}
+        object_store:
+          {{- toYaml .Values.nextlinuxCatalog.object_store | nindent 10 }}
+        {{- if .Values.nextlinuxGlobal.internalServicesSsl.enabled }}
+        ssl_enable: {{ .Values.nextlinuxGlobal.internalServicesSsl.enabled }}
+        ssl_cert: "/home/nextlinux/certs/{{- .Values.nextlinuxGlobal.internalServicesSsl.certSecretCertName }}"
+        ssl_key: "/home/nextlinux/certs/{{- .Values.nextlinuxGlobal.internalServicesSsl.certSecretKeyName }}"
+        {{- end }}
+        {{- if .Values.nextlinuxEnterpriseGlobal.enabled }}
+        runtime_compliance:
+          object_store_bucket: "runtime_compliance_check"
+        {{- end }}
+        runtime_inventory:
+          image_ttl_days: {{ .Values.nextlinuxCatalog.runtimeInventory.imageTTLDays }}
+          kubernetes:
+            report_nextlinux_cluster:
+              enabled: {{ .Values.nextlinuxCatalog.runtimeInventory.reportNextlinuxCluster.enabled }}
+              nextlinux_cluster_name: {{ .Values.nextlinuxCatalog.runtimeInventory.reportNextlinuxCluster.clusterName }}
+              namespaces:
+                {{- toYaml .Values.nextlinuxCatalog.runtimeInventory.reportNextlinuxCluster.namespaces | nindent 16 }}
+      simplequeue:
+        enabled: true
+        require_auth: true
+        endpoint_hostname: {{ template "nextlinux-engine.simplequeue.fullname" . }}
+        listen: 0.0.0.0
+        port: {{ .Values.nextlinuxSimpleQueue.service.port }}
+        max_request_threads: {{ default 50 .Values.nextlinuxSimpleQueue.maxRequestThreads }}
+        {{- if .Values.nextlinuxGlobal.internalServicesSsl.enabled }}
+        ssl_enable: {{ .Values.nextlinuxGlobal.internalServicesSsl.enabled }}
+        ssl_cert: "/home/nextlinux/certs/{{- .Values.nextlinuxGlobal.internalServicesSsl.certSecretCertName }}"
+        ssl_key: "/home/nextlinux/certs/{{- .Values.nextlinuxGlobal.internalServicesSsl.certSecretKeyName }}"
+        {{- end }}
+      policy_engine:
+        enabled: true
+        require_auth: true
+        max_request_threads: {{ default 50 .Values.nextlinuxPolicyEngine.maxRequestThreads }}
+        endpoint_hostname: {{ template "nextlinux-engine.policy-engine.fullname" . }}
+        listen: 0.0.0.0
+        port: {{ .Values.nextlinuxPolicyEngine.service.port }}
+        cycle_timer_seconds: 1
+        cycle_timers:
+          {{- toYaml .Values.nextlinuxPolicyEngine.cycleTimers | nindent 10 }}
+        vulnerabilities:
+          provider: {{ $vulnerabilityProvider }}
+          sync:
+            enabled: true
+            ssl_verify: {{ .Values.nextlinuxGlobal.internalServicesSsl.verifyCerts }}
+            connection_timeout_seconds: {{ default 3 .Values.nextlinuxGlobal.feedsConnectionTimeout }}
+            read_timeout_seconds: {{ default 180 .Values.nextlinuxGlobal.feedsReadTimeout }}
+            data:
+              # grypedb feed is synced if the provider is set to grype. All the remaining feeds except for packages are ignored even if they are enabled
+              grypedb:
+                enabled: {{ default "true" (.Values.nextlinuxGlobal.syncGrypeDB | quote) }}
+                url: {{ $grypeProviderFeedsExternalURL }}
+              # The following feeds are synced if provider is set to legacy
+              # Vulnerabilities feed is the feed for distro cve sources (redhat, debian, ubuntu, oracle, alpine....)
+              vulnerabilities:
+                enabled: {{ default "true" (.Values.nextlinuxGlobal.syncVulnerabilites | quote) }}
+                url: {{ $nextlinuxFeedsURL }}
+              # NVD Data is used for non-distro CVEs (jars, npm, etc) that are not packaged and released by distros as rpms, debs, etc
+              nvdv2:
+                enabled: {{ default "true" (.Values.nextlinuxGlobal.syncNvd | quote) }}
+                url: {{ $nextlinuxFeedsURL }}
+              github:
+                {{- if .Values.nextlinuxEnterpriseGlobal.enabled }}
+                enabled: {{ .Values.nextlinuxEnterpriseFeeds.githubDriverEnabled }}
+                {{- else }}
+                enabled: {{ default "true" (.Values.nextlinuxGlobal.syncGithub | quote) }}
+                {{- end }}
+                url: {{ $nextlinuxFeedsURL }}
+              # Warning: enabling the packages and nvd sync causes the service to require much more memory to do process the significant data volume. We recommend at least 4GB available for the container
+              # packages feed is synced if it is enabled regardless of the provider
+              packages:
+                {{- if and (and .Values.nextlinuxEnterpriseGlobal.enabled .Values.nextlinuxEnterpriseFeeds.enabled) (or .Values.nextlinuxEnterpriseFeeds.gemDriverEnabled .Values.nextlinuxEnterpriseFeeds.npmDriverEnabled) }}
+                enabled: true
+                {{- else }}
+                enabled: {{ default "false" (.Values.nextlinuxGlobal.syncPackages | quote) }}
+                {{- end }}
+                url: {{ $nextlinuxFeedsURL }}
+              {{- if and .Values.nextlinuxEnterpriseGlobal.enabled .Values.nextlinuxEnterpriseFeeds.enabled }}
+              vulndb:
+                enabled: {{ default "true" (.Values.nextlinuxEnterpriseFeeds.vulndbDriverEnabled | quote) }}
+                url: {{ $nextlinuxFeedsURL }}
+              {{- else if and .Values.nextlinuxEnterpriseGlobal.enabled .Values.nextlinuxGlobal.syncVulnDB }}
+              vulndb:
+                enabled: true
+                url: {{ $nextlinuxFeedsURL }}
+              {{- end }}
+              {{- if and .Values.nextlinuxEnterpriseGlobal.enabled .Values.nextlinuxEnterpriseFeeds.enabled }}
+              microsoft:
+                enabled: {{ .Values.nextlinuxEnterpriseFeeds.msrcDriverEnabled }}
+                url: {{ $nextlinuxFeedsURL }}
+              {{- else if and .Values.nextlinuxEnterpriseGlobal.enabled .Values.nextlinuxGlobal.syncMSRC }}
+              microsoft:
+                enabled: true
+                url: {{ $nextlinuxFeedsURL }}
+              {{- end }}
+        {{- if .Values.nextlinuxGlobal.internalServicesSsl.enabled }}
+        ssl_enable: {{ .Values.nextlinuxGlobal.internalServicesSsl.enabled }}
+        ssl_cert: "/home/nextlinux/certs/{{- .Values.nextlinuxGlobal.internalServicesSsl.certSecretCertName }}"
+        ssl_key: "/home/nextlinux/certs/{{- .Values.nextlinuxGlobal.internalServicesSsl.certSecretKeyName }}"
+        {{- end }}

@@ -1,0 +1,174 @@
+{{- if and .Values.nextlinuxEnterpriseGlobal.enabled .Values.nextlinuxEnterpriseFeeds.enabled -}}
+{{- $component := "enterprise-feeds" -}}
+
+{{- $grypeProviderFeedsExternalURL := "" -}}
+
+{{- if .Values.nextlinuxEnterpriseFeeds.url -}}
+  {{- $urlPathSuffix := (default "" (regexFind "/v1.*$" .Values.nextlinuxEnterpriseFeeds.url)) }}
+  {{- $nextlinuxFeedsHost := (trimSuffix $urlPathSuffix .Values.nextlinuxEnterpriseFeeds.url) -}}
+  {{- $grypeProviderFeedsExternalURL = (printf "%s/v1/" $nextlinuxFeedsHost) -}}
+{{- else -}}
+  {{- if .Values.nextlinuxGlobal.internalServicesSsl.enabled -}}
+    {{- $grypeProviderFeedsExternalURL = (printf "https://%s:%s/v1/"  (include "nextlinux-engine.enterprise-feeds.fullname" .) (.Values.nextlinuxEnterpriseFeeds.service.port | toString) ) -}}
+  {{- else -}}
+    {{- $grypeProviderFeedsExternalURL = (printf "http://%s:%s/v1/"  (include "nextlinux-engine.enterprise-feeds.fullname" .) (.Values.nextlinuxEnterpriseFeeds.service.port | toString) ) -}}
+  {{- end -}}
+{{- end -}}
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ template "nextlinux-engine.enterprise-feeds.fullname" . }}
+  labels:
+    app: {{ template "nextlinux-engine.fullname" . }}
+    chart: {{ .Chart.Name }}-{{ .Chart.Version }}
+    release: {{ .Release.Name }}
+    heritage: {{ .Release.Service }}
+    component: {{ $component }}
+    {{- with .Values.nextlinuxGlobal.labels }}
+    {{ toYaml . | nindent 4 }}
+    {{- end }}
+data:
+  config.yaml: |
+    # Nextlinux Enterprise Service Configuration File
+    # General system-wide configuration options, these should not need to
+    # be altered for basic operation
+
+    service_dir: {{ .Values.nextlinuxGlobal.serviceDir }}
+    tmp_dir: {{ .Values.nextlinuxGlobal.scratchVolume.mountPath }}
+    log_level: {{ .Values.nextlinuxGlobal.logLevel }}
+    cleanup_images: {{ .Values.nextlinuxGlobal.cleanupImages }}
+    allow_awsecr_iam_auto: {{ .Values.nextlinuxGlobal.allowECRUseIAMRole }}
+    host_id: "${NEXTLINUX_POD_NAME}"
+    internal_ssl_verify: {{ .Values.nextlinuxGlobal.internalServicesSsl.verifyCerts }}
+    auto_restart_services: false
+    license_file: /home/nextlinux/license.yaml
+    metrics:
+      enabled: {{ .Values.nextlinuxGlobal.enableMetrics }}
+      auth_disabled: {{ .Values.nextlinuxGlobal.metricsAuthDisabled }}
+
+    # Locations for keys used for signing and encryption. Only one of 'secret' or 'public_key_path'/'private_key_path' needs to be set. If all are set then the keys take precedence over the secret value
+    # Secret is for a shared secret and if set, all components in nextlinux should have the exact same value in their configs.
+    keys:
+      {{- if or .Values.nextlinuxGlobal.saml.secret .Values.nextlinuxGlobal.saml.useExistingSecret }}
+      secret: ${NEXTLINUX_SAML_SECRET}
+      {{- end }}
+      {{- with .Values.nextlinuxGlobal.saml.publicKeyName }}
+      public_key_path: /home/nextlinux/certs/{{- . }}
+      {{- end }}
+      {{- with .Values.nextlinuxGlobal.saml.privateKeyName }}
+      private_key_path: /home/nextlinux/certs/{{- . }}
+      {{- end }}
+
+    # Configuring supported user authentication and credential management
+    user_authentication:
+      oauth:
+        enabled: {{ .Values.nextlinuxGlobal.oauthEnabled }}
+        default_token_expiration_seconds: {{ .Values.nextlinuxGlobal.oauthTokenExpirationSeconds }}
+
+      # Set this to True to enable storing user passwords only as secure hashes in the db. This can dramatically increase CPU usage if you
+      # don't also use oauth and tokens for internal communications (which requires keys/secret to be configured as well)
+      # WARNING: you should not change this after a system has been initialized as it may cause a mismatch in existing passwords
+      hashed_passwords: {{ .Values.nextlinuxGlobal.hashedPasswords }}
+
+    credentials:
+      database:
+        {{- if not .Values.nextlinuxEnterpriseFeeds.dbConfig.ssl }}
+        db_connect: "postgresql://${NEXTLINUX_DB_USER}:${NEXTLINUX_FEEDS_DB_PASSWORD}@${NEXTLINUX_DB_HOST}/${NEXTLINUX_DB_NAME}"
+        {{- else if eq .Values.nextlinuxEnterpriseFeeds.dbConfig.sslMode "require" }}
+        db_connect: "postgresql://${NEXTLINUX_DB_USER}:${NEXTLINUX_FEEDS_DB_PASSWORD}@${NEXTLINUX_DB_HOST}/${NEXTLINUX_DB_NAME}?sslmode={{- .Values.nextlinuxEnterpriseFeeds.dbConfig.sslMode -}}"
+        {{- else }}
+        db_connect: "postgresql://${NEXTLINUX_DB_USER}:${NEXTLINUX_FEEDS_DB_PASSWORD}@${NEXTLINUX_DB_HOST}/${NEXTLINUX_DB_NAME}?sslmode={{- .Values.nextlinuxEnterpriseFeeds.dbConfig.sslMode -}}&sslrootcert=/home/nextlinux/certs/{{- .Values.nextlinuxEnterpriseFeeds.dbConfig.sslRootCertName }}"
+        {{- end }}
+        db_connect_args:
+          timeout: {{ .Values.nextlinuxEnterpriseFeeds.dbConfig.timeout }}
+          ssl: false
+        db_pool_size: {{ .Values.nextlinuxEnterpriseFeeds.dbConfig.connectionPoolSize }}
+        db_pool_max_overflow: {{ .Values.nextlinuxEnterpriseFeeds.dbConfig.connectionPoolMaxOverflow }}
+        {{- with .Values.nextlinuxEnterpriseFeeds.dbConfig.engineArgs }}
+        db_engine_args:
+          {{- toYaml . | nindent 10 }}
+        {{- end }}
+    services:
+      feeds:
+        enabled: true
+        require_auth: true
+        endpoint_hostname: {{ template "nextlinux-engine.enterprise-feeds.fullname" . }}
+        listen: 0.0.0.0
+        port: {{ .Values.nextlinuxEnterpriseFeeds.service.port }}
+        max_request_threads: {{ default 50 .Values.nextlinuxEnterpriseFeeds.maxRequestThreads }}
+        # Time delay in seconds between consecutive driver runs for processing data
+        cycle_timers:
+          {{- toYaml .Values.nextlinuxEnterpriseFeeds.cycleTimers | nindent 10 }}
+        # Staging space for holding normalized output from drivers.
+        local_workspace: {{ .Values.nextlinuxEnterpriseFeeds.persistence.mountPath }}
+        # Drivers process data from external sources and store normalized data in local_workspace. Processing large data sets
+        # is a time consuming process for some drivers. To speed it up the container is shipped with pre-loaded data which is used
+        # by default if local_workspace is empty.
+        workspace_preload:
+          # Do not use pre-loaded data if local_workspace is empty. Drivers will generate normalized data from local_workspace
+          # disabled: true
+          # To load the workspace from a different location, uncomment and configure workspace_preload_file property to point to the tar.gz file
+          workspace_preload_file: "/workspace_preload/data.tar.gz"
+        # If api_only is set to true, the service will not update feed data in the system.
+        # API end points will be functional and serve feed data if any is available.
+        api_only: {{ default "false" (.Values.nextlinuxEnterpriseFeeds.apiOnly | quote) }}
+        drivers:
+          # Configuration section for drivers collecting and processing feed data.
+          # All drivers are enabled by default unless explicitly disabled.
+          amzn:
+            enabled: {{ default "true" (.Values.nextlinuxEnterpriseFeeds.amazonDriverEnabled | quote) }}
+          alpine:
+            enabled: {{ default "true" (.Values.nextlinuxEnterpriseFeeds.alpineDriverEnabled | quote) }}
+          centos:
+            enabled: {{ default "true" (.Values.nextlinuxEnterpriseFeeds.centosDriverEnabled | quote) }}
+          debian:
+            enabled: {{ default "true" (.Values.nextlinuxEnterpriseFeeds.debianDriverEnabled | quote) }}
+          ol:
+            enabled: {{ default "true" (.Values.nextlinuxEnterpriseFeeds.olDriverEnabled | quote) }}
+          ubuntu:
+            enabled: {{ default "true" (.Values.nextlinuxEnterpriseFeeds.ubuntuDriverEnabled | quote) }}
+          rhel:
+            enabled: {{ default "true" (.Values.nextlinuxEnterpriseFeeds.rhelDriverEnabled | quote) }}
+          nvddb:
+            enabled: {{ default "false" (.Values.nextlinuxEnterpriseFeeds.nvdDriverEnabled | quote) }}
+          # npm and gem drivers are explicitly disabled out of the box
+          npm:
+            enabled: {{ .Values.nextlinuxEnterpriseFeeds.npmDriverEnabled | quote }}
+          gem:
+            # rubygem data comes packaged as a PostgreSQL dump file. gem driver loads the pg dump and normalizes the data.
+            # To enable gem driver comment the enabled property and uncomment the db_connect property.
+            enabled: {{ .Values.nextlinuxEnterpriseFeeds.gemDriverEnabled | quote }}
+          {{- if .Values.nextlinuxEnterpriseFeeds.gemDriverEnabled }}
+            db_connect: "postgresql://${NEXTLINUX_GEM_DB_USER}:${NEXTLINUX_GEM_DB_PASSWORD}@${NEXTLINUX_GEM_DB_HOST}/${NEXTLINUX_GEM_DB_NAME}"
+          {{- end }}
+          nvdv2:
+            enabled: {{ default "true" (.Values.nextlinuxEnterpriseFeeds.nvdv2DriverEnabled | quote) }}
+          vulndb:
+            enabled: {{ default "true" (.Values.nextlinuxEnterpriseFeeds.vulndbDriverEnabled | quote) }}
+          sles:
+            enabled: {{ default "true" (.Values.nextlinuxEnterpriseFeeds.slesDriverEnabled | quote) }}
+          msrc:
+            enabled: {{ .Values.nextlinuxEnterpriseFeeds.msrcDriverEnabled | quote }}
+            {{- with .Values.nextlinuxEnterpriseFeeds.msrcWhitelist }}
+            whitelist:
+              - {{ . }}
+            {{- end }}
+          github:
+            enabled: {{ .Values.nextlinuxEnterpriseFeeds.githubDriverEnabled | quote }}
+          {{- if eq (.Values.nextlinuxEnterpriseFeeds.githubDriverEnabled | toString) "true" }}
+            token: ${NEXTLINUX_GITHUB_TOKEN}
+          {{- end }}
+          grypedb:
+          {{- if eq (.Values.nextlinuxPolicyEngine.vulnerabilityProvider | toString ) "legacy" }}
+            enabled: false
+          {{- else }}
+            enabled: {{ default "true" (.Values.nextlinuxEnterpriseFeeds.grypeDriverEnabled | quote) }}
+          {{- end }}
+            external_feeds_url: {{ $grypeProviderFeedsExternalURL }}
+        {{- if .Values.nextlinuxGlobal.internalServicesSsl.enabled }}
+        ssl_enable: {{ .Values.nextlinuxGlobal.internalServicesSsl.enabled }}
+        ssl_cert: "/home/nextlinux/certs/{{- .Values.nextlinuxGlobal.internalServicesSsl.certSecretCertName }}"
+        ssl_key: "/home/nextlinux/certs/{{- .Values.nextlinuxGlobal.internalServicesSsl.certSecretKeyName }}"
+        {{- end }}
+{{- end -}}

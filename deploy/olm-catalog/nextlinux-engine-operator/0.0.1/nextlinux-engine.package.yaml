@@ -1,0 +1,4 @@
+packageName: nextlinux-engine
+channels:
+  - name: alpha
+    currentCSV: nextlinux-engine-operator.v0.0.1

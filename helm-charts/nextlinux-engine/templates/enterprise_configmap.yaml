@@ -1,0 +1,152 @@
+{{- if and .Values.nextlinuxEnterpriseGlobal.enabled (or .Values.nextlinuxEnterpriseRbac.enabled .Values.nextlinuxEnterpriseReports.enabled) -}}
+{{- $component := "enterprise" -}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ template "nextlinux-engine.enterprise.fullname" . }}
+  labels:
+    app: {{ template "nextlinux-engine.fullname" . }}
+    chart: {{ .Chart.Name }}-{{ .Chart.Version }}
+    release: {{ .Release.Name }}
+    heritage: {{ .Release.Service }}
+    component: {{ $component }}
+    {{- with .Values.nextlinuxGlobal.labels }}
+    {{ toYaml . | nindent 4 }}
+    {{- end }}
+data:
+  config.yaml: |
+    # Nextlinux Enterprise Service Configuration File
+
+    # General system-wide configuration options, these should not need to
+    # be altered for basic operation
+    #
+    service_dir: {{ .Values.nextlinuxGlobal.serviceDir }}
+    tmp_dir: {{ .Values.nextlinuxGlobal.scratchVolume.mountPath }}
+    log_level: {{ .Values.nextlinuxGlobal.logLevel }}
+    cleanup_images: {{ .Values.nextlinuxGlobal.cleanupImages }}
+
+    allow_awsecr_iam_auto: {{ .Values.nextlinuxGlobal.allowECRUseIAMRole }}
+    host_id: "${NEXTLINUX_POD_NAME}"
+    internal_ssl_verify: {{ .Values.nextlinuxGlobal.internalServicesSsl.verifyCerts }}
+    auto_restart_services: false
+    license_file: /home/nextlinux/license.yaml
+
+    global_client_connect_timeout: {{ default 0 .Values.nextlinuxGlobal.clientConnectTimeout }}
+    global_client_read_timeout: {{ default 0 .Values.nextlinuxGlobal.clientReadTimeout }}
+
+    metrics:
+      enabled: {{ .Values.nextlinuxGlobal.enableMetrics }}
+      auth_disabled: {{ .Values.nextlinuxGlobal.metricsAuthDisabled }}
+
+    # Locations for keys used for signing and encryption. Only one of 'secret' or 'public_key_path'/'private_key_path' needs to be set. If all are set then the keys take precedence over the secret value
+    # Secret is for a shared secret and if set, all components in nextlinux should have the exact same value in their configs.
+    keys:
+      {{- if or .Values.nextlinuxGlobal.saml.secret .Values.nextlinuxGlobal.saml.useExistingSecret }}
+      secret: ${NEXTLINUX_SAML_SECRET}
+      {{- end }}
+      {{- with .Values.nextlinuxGlobal.saml.publicKeyName }}
+      public_key_path: /home/nextlinux/certs/{{- . }}
+      {{- end }}
+      {{- with .Values.nextlinuxGlobal.saml.privateKeyName }}
+      private_key_path: /home/nextlinux/certs/{{- . }}
+      {{- end }}
+
+    # Configuring supported user authentication and credential management
+    user_authentication:
+      oauth:
+        enabled: {{ .Values.nextlinuxGlobal.oauthEnabled }}
+        default_token_expiration_seconds: {{ .Values.nextlinuxGlobal.oauthTokenExpirationSeconds }}
+
+      # Set this to True to enable storing user passwords only as secure hashes in the db. This can dramatically increase CPU usage if you
+      # don't also use oauth and tokens for internal communications (which requires keys/secret to be configured as well)
+      # WARNING: you should not change this after a system has been initialized as it may cause a mismatch in existing passwords
+      hashed_passwords: {{ .Values.nextlinuxGlobal.hashedPasswords }}
+
+    credentials:
+      database:
+        {{- if not .Values.nextlinuxGlobal.dbConfig.ssl }}
+        db_connect: "postgresql://${NEXTLINUX_DB_USER}:${NEXTLINUX_DB_PASSWORD}@${NEXTLINUX_DB_HOST}/${NEXTLINUX_DB_NAME}"
+        {{- else if eq .Values.nextlinuxGlobal.dbConfig.sslMode "require" }}
+        db_connect: "postgresql://${NEXTLINUX_DB_USER}:${NEXTLINUX_DB_PASSWORD}@${NEXTLINUX_DB_HOST}/${NEXTLINUX_DB_NAME}?sslmode={{- .Values.nextlinuxGlobal.dbConfig.sslMode -}}"
+        {{- else }}
+        db_connect: "postgresql://${NEXTLINUX_DB_USER}:${NEXTLINUX_DB_PASSWORD}@${NEXTLINUX_DB_HOST}/${NEXTLINUX_DB_NAME}?sslmode={{- .Values.nextlinuxGlobal.dbConfig.sslMode -}}&sslrootcert=/home/nextlinux/certs/{{- .Values.nextlinuxGlobal.dbConfig.sslRootCertName -}}"
+        {{- end }}
+        db_connect_args:
+          timeout: {{ .Values.nextlinuxGlobal.dbConfig.timeout }}
+          ssl: false
+        db_pool_size: {{ .Values.nextlinuxGlobal.dbConfig.connectionPoolSize }}
+        db_pool_max_overflow: {{ .Values.nextlinuxGlobal.dbConfig.connectionPoolMaxOverflow }}
+        {{- with .Values.nextlinuxGlobal.dbConfig.engineArgs }}
+        db_engine_args:
+          {{- toYaml . | nindent 10 }}
+        {{- end }}
+
+    services:
+      {{- if .Values.nextlinuxEnterpriseRbac.enabled }}
+      # This should never be exposed outside of linked containers/localhost. It is used only for internal service access
+      rbac_authorizer:
+        enabled: true
+        require_auth: true
+        endpoint_hostname: localhost
+        listen: 127.0.0.1
+        port: {{ .Values.nextlinuxEnterpriseRbac.service.authPort }}
+        max_request_threads: {{ default 50 .Values.nextlinuxEnterpriseRbac.maxRequestThreads }}
+      rbac_manager:
+        enabled: true
+        require_auth: true
+        endpoint_hostname: {{ template "nextlinux-engine.api.fullname" . }}
+        listen: 0.0.0.0
+        port: {{ .Values.nextlinuxEnterpriseRbac.service.apiPort }}
+        max_request_threads: {{ default 50 .Values.nextlinuxEnterpriseRbac.maxRequestThreads }}
+        authorization_handler: external
+        authorization_handler_config:
+          endpoint: "http://localhost:{{- .Values.nextlinuxEnterpriseRbac.service.authPort }}"
+        {{- if .Values.nextlinuxGlobal.internalServicesSsl.enabled }}
+        ssl_enable: {{ .Values.nextlinuxGlobal.internalServicesSsl.enabled }}
+        ssl_cert: "/home/nextlinux/certs/{{- .Values.nextlinuxGlobal.internalServicesSsl.certSecretCertName }}"
+        ssl_key: "/home/nextlinux/certs/{{- .Values.nextlinuxGlobal.internalServicesSsl.certSecretKeyName }}"
+        {{- end }}
+      {{- end }}
+      {{- if .Values.nextlinuxEnterpriseReports.enabled }}
+      reports:
+        enabled: true
+        require_auth: true
+        endpoint_hostname: {{ template "nextlinux-engine.api.fullname" . }}
+        listen: '0.0.0.0'
+        port: {{ .Values.nextlinuxEnterpriseReports.service.port }}
+        max_request_threads: {{ default 50 .Values.nextlinuxEnterpriseReports.maxRequestThreads }}
+        enable_graphiql: "{{ .Values.nextlinuxEnterpriseReports.enableGraphql }}"
+        enable_data_ingress: "{{ .Values.nextlinuxEnterpriseReports.enableDataIngress }}"
+        cycle_timers:
+          {{- toYaml .Values.nextlinuxEnterpriseReports.cycleTimers | nindent 10 }}
+        {{- if .Values.nextlinuxEnterpriseRbac.enabled }}
+        authorization_handler: external
+        authorization_handler_config:
+          endpoint: "http://localhost:{{- .Values.nextlinuxEnterpriseRbac.service.authPort }}"
+        {{- end }}
+        {{- if .Values.nextlinuxGlobal.internalServicesSsl.enabled }}
+        ssl_enable: {{ .Values.nextlinuxGlobal.internalServicesSsl.enabled }}
+        ssl_cert: "/home/nextlinux/certs/{{- .Values.nextlinuxGlobal.internalServicesSsl.certSecretCertName }}"
+        ssl_key: "/home/nextlinux/certs/{{- .Values.nextlinuxGlobal.internalServicesSsl.certSecretKeyName }}"
+        {{- end }}
+      {{- end }}
+      {{- if .Values.nextlinuxEnterpriseNotifications.enabled }}
+      notifications:
+        enabled: true
+        require_auth: true
+        endpoint_hostname: {{ template "nextlinux-engine.api.fullname" . }}
+        listen: '0.0.0.0'
+        port: {{ .Values.nextlinuxEnterpriseNotifications.service.port }}
+        max_request_threads: {{ default 50 .Values.nextlinuxEnterpriseNotifications.maxRequestThreads }}
+        authorization_handler: external
+        authorization_handler_config:
+          endpoint: "http://localhost:{{- .Values.nextlinuxEnterpriseRbac.service.authPort }}"
+        cycle_timers:
+          {{- toYaml .Values.nextlinuxEnterpriseNotifications.cycleTimers | nindent 10 }}
+        {{- if .Values.nextlinuxEnterpriseNotifications.uiUrl }}
+        ui_url: "{{ .Values.nextlinuxEnterpriseNotifications.uiUrl }}"
+        {{- else }}
+        ui_url: {{ include "nextlinux-engine.enterprise-ui.fullname" . | quote }}
+        {{- end }}
+      {{- end }}
+{{- end -}}

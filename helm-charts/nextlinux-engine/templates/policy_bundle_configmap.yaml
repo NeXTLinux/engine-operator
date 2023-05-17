@@ -1,0 +1,18 @@
+{{- if .Values.nextlinuxGlobal.policyBundles }}
+kind: ConfigMap
+apiVersion: v1
+metadata:
+  name: {{ template "nextlinux-engine.fullname" . }}-policy-bundles
+  labels:
+    app: {{ template "nextlinux-engine.fullname" . }}
+    chart: {{ .Chart.Name }}-{{ .Chart.Version }}
+    release: {{ .Release.Name }}
+    heritage: {{ .Release.Service }}
+    {{- with .Values.nextlinuxGlobal.labels }}
+    {{ toYaml . | nindent 4 }}
+    {{- end }}
+data:
+{{- with .Values.nextlinuxGlobal.policyBundles }}
+{{- toYaml . | nindent 2 }}
+{{- end }}
+{{- end }}
